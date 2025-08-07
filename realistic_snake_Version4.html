@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Realistic Snake — Nokia Throwback</title>
+  <style>
+    :root{
+      --bg:#0b1b0f; /* deep green */
+      --panel:#101a12;
+      --accent:#9be37e;
+      --accent-2:#e3ffcf;
+      --danger:#e85d5d;
+      --shadow: rgba(0,0,0,.25);
+      --grid: 28; /* logical grid cell size in px */
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;}
+    body{
+      margin:0; display:grid; place-items:center; background: radial-gradient(1200px 600px at 50% 20%, #12321e 0%, #0a1a10 55%, #050d08 100%);
+      font: 14px/1.3 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      color: #e7ffe0;
+    }
+    .wrap{
+      display:grid; gap:12px; padding:16px; width:min(980px, 96vw);
+      grid-template-columns: 1fr 260px; align-items:start;
+    }
+    @media (max-width: 900px){
+      .wrap{ grid-template-columns: 1fr; }
+    }
+    canvas{
+      width:100%; height:auto; border-radius:16px; box-shadow: 0 12px 28px var(--shadow), inset 0 0 0 1px rgba(255,255,255,.06);
+      background:#0f1f14;
+    }
+    .panel{
+      background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.15));
+      border-radius:16px; padding:14px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.06), 0 8px 24px var(--shadow);
+      position:relative;
+    }
+    .title{ font-weight:700; letter-spacing:.3px; margin-bottom:8px; }
+    .stat{ display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid rgba(255,255,255,.07)}
+    .stat:last-child{border-bottom:none}
+    .controls{ display:flex; flex-wrap:wrap; gap:8px; margin-top:10px }
+    button, select{
+      appearance:none; border:none; border-radius:12px; padding:10px 12px; background:#17281d; color:#e8ffe3;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.07);
+      cursor:pointer;
+    }
+    button:hover{filter:brightness(1.1)}
+    button:active{transform:translateY(1px)}
+    .danger{ background:#331515; color:#ffe8e8; box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
+    .note{ opacity:.8; font-size:12px; margin-top:8px }
+    .dpad{
+      margin-top:12px; display:grid; grid-template-columns:repeat(3, 60px); grid-template-rows:repeat(3, 60px); gap:10px; justify-content:center;
+    }
+    .dpad button{ width:60px; height:60px; border-radius:14px; }
+    .dpad .spacer{opacity:0; pointer-events:none}
+    .brand{ position:absolute; right:12px; top:10px; opacity:.6; font-size:12px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="game" width="840" height="560" aria-label="Realistic Snake game canvas" role="img"></canvas>
+    <section class="panel" aria-live="polite">
+      <div class="brand">Nokia throwback • modern canvas</div>
+      <div class="title">Realistic Snake</div>
+      <div class="stat"><span>Score</span><strong id="score">0</strong></div>
+      <div class="stat"><span>Best</span><strong id="best">0</strong></div>
+      <div class="stat"><span>Speed</span><strong id="speed">1×</strong></div>
+      <div class="controls">
+        <button id="start">▶ Start</button>
+        <button id="pause">⏸ Pause</button>
+        <button id="reset" class="danger">↻ Reset</button>
+        <select id="mode">
+          <option value="walls">Walls (classic)</option>
+          <option value="wrap">Wrap-around</option>
+        </select>
+        <select id="style">
+          <option value="forest">Forest (realistic)</option>
+          <option value="mono">Monochrome (OG Nokia)</option>
+        </select>
+      </div>
+      <div class="dpad" aria-label="On-screen controls">
+        <span class="spacer"></span>
+        <button data-dir="up">⬆</button>
+        <span class="spacer"></span>
+        <button data-dir="left">⬅</button>
+        <button data-dir="down">⬇</button>
+        <button data-dir="right">➡</button>
+      </div>
+      <div class="note">Keyboard: Arrow keys / WASD. Mobile: tap the D‑pad or swipe.
+        Eat apples to grow. Avoid your body and (in Walls mode) the borders.
+      </div>
+    </section>
+  </div>
+
+  <script>
+  /*
+   * Realistic Snake — HTML5 Canvas
+   * Nokia-inspired mechanics; modern visuals:
+   *  - Smooth, curved body using Catmull–Rom-like interpolation on segment centers
+   *  - Subtle slither using sine offset, glossy gradient + soft shadow for pseudo‑3D
+   *  - Juicy apple particles + bite animation
+   *  - Two modes: walls (classic) or wrap‑around
+   *  - OG monochrome skin toggle
+   */
+  (()=>{
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    const UI = {
+      score: document.getElementById('score'),
+      best: document.getElementById('best'),
+      speed: document.getElementById('speed'),
+      start: document.getElementById('start'),
+      pause: document.getElementById('pause'),
+      reset: document.getElementById('reset'),
+      mode: document.getElementById('mode'),
+      style: document.getElementById('style'),
+      dpad: document.querySelector('.dpad')
+    };
+
+    // Persistent best score
+    const BEST_KEY = 'realistic_snake_best_v1';
+    let bestScore = Number(localStorage.getItem(BEST_KEY)||0);
+    UI.best.textContent = bestScore;
+
+    // Grid
+    const GRID = 28; // pixels per logical cell (visual)
+    const COLS = Math.floor(canvas.width / GRID);
+    const ROWS = Math.floor(canvas.height / GRID);
+
+    // Game state
+    let snake, dir, nextDir, apple, playing=false, paused=false, score=0, speedMult=1;
+    let lastTime=0, stepMs=120; // base step in ms (classic tick)
+
+    // Particles for juice
+    const particles = [];
+
+    // Input
+    const DIRS = { up:{x:0,y:-1}, down:{x:0,y:1}, left:{x:-1,y:0}, right:{x:1,y:0} };
+
+    function reset(){
+      snake = [ {x: Math.floor(COLS/2), y: Math.floor(ROWS/2)}, {x:Math.floor(COLS/2)-1, y:Math.floor(ROWS/2)}, {x:Math.floor(COLS/2)-2, y:Math.floor(ROWS/2)} ];
+      dir = 'right'; nextDir = 'right';
+      score = 0; speedMult = 1; stepMs = 120;
+      UI.score.textContent = score; UI.speed.textContent = speedMult.toFixed(1)+'×';
+      paused=false; playing=false;
+      spawnApple();
+      draw(0);
+    }
+
+    function spawnApple(){
+      do{
+        apple = { x: Math.floor(Math.random()*COLS), y: Math.floor(Math.random()*ROWS), t: 0 };
+      } while (snake.some(s=>s.x===apple.x && s.y===apple.y));
+    }
+
+    function changeDir(newDir){
+      // prevent 180° turns
+      const opposites = {up:'down', down:'up', left:'right', right:'left'};
+      if (opposites[newDir] !== dir) nextDir = newDir;
+    }
+
+    // Swipe input
+    let touchStart=null;
+    canvas.addEventListener('touchstart', e=>{ touchStart = [...e.changedTouches][0]; });
+    canvas.addEventListener('touchend', e=>{
+      if(!touchStart) return; const t = [...e.changedTouches][0];
+      const dx = t.clientX - touchStart.clientX; const dy = t.clientY - touchStart.clientY;
+      if (Math.abs(dx)>Math.abs(dy)) changeDir(dx>0? 'right':'left');
+      else changeDir(dy>0? 'down':'up');
+      touchStart=null;
+    }, {passive:true});
+
+    // D‑pad input
+    UI.dpad.addEventListener('click', (e)=>{
+      const b = e.target.closest('button'); if(!b) return; changeDir(b.dataset.dir);
+    });
+
+    // Keyboard input
+    const keyMap = {ArrowUp:'up', KeyW:'up', ArrowDown:'down', KeyS:'down', ArrowLeft:'left', KeyA:'left', ArrowRight:'right', KeyD:'right'}
+    window.addEventListener('keydown', (e)=>{
+      const d = keyMap[e.code]; if(d){ e.preventDefault(); changeDir(d); }
+      if(e.code==='Space'){ togglePause(); }
+    });
+
+    function togglePause(){ if(!playing) return; paused=!paused; }
+
+    // Game loop using rAF and fixed-timestep simulation
+    function loop(ts){
+      if(!playing){ draw(ts); return; }
+      const elapsed = ts - lastTime;
+      if(!paused){
+        if(elapsed >= stepMs / speedMult){
+          lastTime = ts;
+          step();
+        }
+      }
+      draw(ts);
+      requestAnimationFrame(loop);
+    }
+
+    function step(){
+      dir = nextDir;
+      const head = { ...snake[0] };
+      head.x += DIRS[dir].x; head.y += DIRS[dir].y;
+
+      if (UI.mode.value==='wrap'){
+        if(head.x<0) head.x=COLS-1; if(head.x>=COLS) head.x=0; if(head.y<0) head.y=ROWS-1; if(head.y>=ROWS) head.y=0;
+      } else {
+        // Walls mode
+        if(head.x<0 || head.x>=COLS || head.y<0 || head.y>=ROWS){ gameOver(); return; }
+      }
+
+      // Self collision
+      if (snake.some((s,i)=> i>0 && s.x===head.x && s.y===head.y)) { gameOver(); return; }
+
+      snake.unshift(head);
+
+      // Apple eaten
+      if (head.x===apple.x && head.y===apple.y){
+        score++; UI.score.textContent = score;
+        // speed up slightly every 3 apples
+        if (score % 3 === 0 && speedMult < 2.5){ speedMult += 0.1; UI.speed.textContent = speedMult.toFixed(1)+'×'; }
+        biteEffect(head);
+        spawnApple();
+      } else {
+        snake.pop();
+      }
+    }
+
+    function gameOver(){
+      playing=false; paused=false;
+      bestScore = Math.max(bestScore, score); localStorage.setItem(BEST_KEY, bestScore);
+      UI.best.textContent = bestScore;
+      // small explosion of segments
+      for(let i=0;i<8;i++) particles.push({x: snake[0].x*GRID+GRID/2, y:snake[0].y*GRID+GRID/2, vx:(Math.random()-0.5)*3, vy:(Math.random()-0.5)*3-1, life: 40, col:'rgba(255,90,90,1)'});
+    }
+
+    function biteEffect(head){
+      for(let i=0;i<24;i++){
+        particles.push({ x: head.x*GRID+GRID/2, y: head.y*GRID+GRID/2, vx:(Math.random()-0.5)*2.6, vy:(Math.random()-0.5)*2.6-0.8, life: 34+Math.random()*12, col:'rgba(230,255,210,1)'});
+      }
+    }
+
+    function draw(ts){
+      const style = UI.style.value;
+      // Background: realistic grass or OG green monochrome grid
+      if(style==='forest') drawForestBG(ts); else drawMonoBG();
+
+      // Apple (juicy with sheen)
+      drawApple(ts);
+
+      // Snake
+      drawSnake(ts);
+
+      // Particles
+      drawParticles();
+
+      // UI overlays
+      if(!playing){
+        ctx.save();
+        ctx.fillStyle='rgba(0,0,0,.35)';
+        ctx.fillRect(0,0,canvas.width,canvas.height);
+        ctx.fillStyle='rgba(255,255,255,.92)';
+        ctx.textAlign='center';
+        ctx.font='700 28px system-ui,Segoe UI,Roboto';
+        ctx.fillText(score>0? 'Game Over' : 'Realistic Snake', canvas.width/2, canvas.height/2-8);
+        ctx.font='500 16px system-ui,Segoe UI,Roboto';
+        ctx.fillText('Press Start or Space', canvas.width/2, canvas.height/2+20);
+        ctx.restore();
+      } else if (paused){
+        ctx.save();
+        ctx.fillStyle='rgba(0,0,0,.35)'; ctx.fillRect(0,0,canvas.width,canvas.height);
+        ctx.fillStyle='rgba(255,255,255,.9)'; ctx.textAlign='center'; ctx.font='700 24px system-ui,Segoe UI,Roboto'; ctx.fillText('Paused', canvas.width/2, canvas.height/2);
+        ctx.restore();
+      }
+    }
+
+    function drawForestBG(ts){
+      // Subtle grass texture using layered noise + grid lines
+      const g = ctx.createLinearGradient(0,0,0,canvas.height);
+      g.addColorStop(0,'#0f2a18'); g.addColorStop(.5,'#12361e'); g.addColorStop(1,'#0c2316');
+      ctx.fillStyle=g; ctx.fillRect(0,0,canvas.width,canvas.height);
+
+      // Misty vignette
+      const rad = ctx.createRadialGradient(canvas.width/2, canvas.height*0.3, canvas.height*0.05, canvas.width/2, canvas.height*0.3, canvas.height*0.9);
+      rad.addColorStop(0,'rgba(255,255,255,.06)'); rad.addColorStop(1,'rgba(255,255,255,0)');
+      ctx.fillStyle=rad; ctx.fillRect(0,0,canvas.width,canvas.height);
+
+      // Soft grid for guidance
+      ctx.save(); ctx.globalAlpha=0.08; ctx.strokeStyle='#d3ffd3'; ctx.lineWidth=1;
+      ctx.beginPath();
+      for(let x=0; x<=canvas.width; x+=GRID){ ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); }
+      for(let y=0; y<=canvas.height; y+=GRID){ ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); }
+      ctx.stroke(); ctx.restore();
+    }
+
+    function drawMonoBG(){
+      ctx.fillStyle='#001b09'; ctx.fillRect(0,0,canvas.width,canvas.height);
+      ctx.save(); ctx.globalAlpha=0.18; ctx.strokeStyle='#6cff6c'; ctx.lineWidth=1;
+      ctx.beginPath();
+      for(let x=0; x<=canvas.width; x+=GRID){ ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); }
+      for(let y=0; y<=canvas.height; y+=GRID){ ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); }
+      ctx.stroke(); ctx.restore();
+    }
+
+    function drawApple(ts){
+      const cx = apple.x*GRID + GRID/2, cy = apple.y*GRID + GRID/2;
+      const pulse = 1 + Math.sin((ts||0)/400)*0.06;
+      ctx.save();
+      // shadow
+      ctx.fillStyle='rgba(0,0,0,.35)';
+      ctx.beginPath(); ctx.ellipse(cx, cy+GRID*0.22, GRID*0.32, GRID*0.18, 0, 0, Math.PI*2); ctx.fill();
+
+      // body
+      const grad = ctx.createRadialGradient(cx-GRID*0.1, cy-GRID*0.1, GRID*0.1, cx, cy, GRID*0.42*pulse);
+      grad.addColorStop(0,'#ffffff');
+      grad.addColorStop(0.02,'#ffefd5');
+      grad.addColorStop(0.25,'#ff5252');
+      grad.addColorStop(1,'#8a1b1b');
+      ctx.fillStyle=grad;
+      ctx.beginPath(); ctx.arc(cx, cy, GRID*0.38*pulse, 0, Math.PI*2); ctx.fill();
+
+      // leaf
+      ctx.fillStyle='#7acb5a';
+      ctx.beginPath(); ctx.ellipse(cx+GRID*0.1, cy-GRID*0.28, GRID*0.16, GRID*0.09, -0.6, 0, Math.PI*2); ctx.fill();
+
+      // stalk
+      ctx.strokeStyle='#3b2a1a'; ctx.lineWidth=3; ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(cx, cy-GRID*0.28); ctx.lineTo(cx, cy-GRID*0.46); ctx.stroke();
+
+      ctx.restore();
+    }
+
+    function drawSnake(ts){
+      // Prepare a smooth curve through segment centers
+      const pts = snake.map(s=>({x:s.x*GRID+GRID/2, y:s.y*GRID+GRID/2}));
+      if(pts.length<2) return;
+
+      // Slither: offset each point along a normal using a sine wave
+      const t = (ts||0)/1000;
+      const amp = GRID*0.08; const freq = 8; // subtle
+      const slitherPts = pts.map((p,i)=>{
+        const prev = pts[Math.max(0,i-1)];
+        const next = pts[Math.min(pts.length-1,i+1)];
+        const dx = next.x - prev.x; const dy = next.y - prev.y;
+        const len = Math.hypot(dx,dy)||1; const nx = -dy/len; const ny = dx/len;
+        const off = Math.sin((i*0.6) + t*freq) * amp;
+        return {x: p.x + nx*off, y: p.y + ny*off};
+      });
+
+      // Draw shadow
+      ctx.save();
+      ctx.strokeStyle='rgba(0,0,0,.4)'; ctx.lineWidth=GRID*0.7; ctx.lineCap='round'; ctx.lineJoin='round';
+      ctx.beginPath();
+      drawSpline(ctx, slitherPts);
+      ctx.stroke();
+
+      // Body gradient
+      const head = slitherPts[0];
+      const bodyGrad = ctx.createLinearGradient(head.x, head.y, slitherPts[slitherPts.length-1].x, slitherPts[slitherPts.length-1].y);
+      if(UI.style.value==='mono'){
+        bodyGrad.addColorStop(0,'#9dff9d'); bodyGrad.addColorStop(1,'#1aff1a');
+      } else {
+        bodyGrad.addColorStop(0,'#d3ffd3'); bodyGrad.addColorStop(.3,'#6bd36b'); bodyGrad.addColorStop(1,'#235b23');
+      }
+
+      // Body
+      ctx.strokeStyle=bodyGrad; ctx.lineWidth=GRID*0.64; ctx.lineCap='round'; ctx.lineJoin='round';
+      ctx.beginPath(); drawSpline(ctx, slitherPts); ctx.stroke();
+
+      // Gloss highlight
+      ctx.globalAlpha=.35; ctx.strokeStyle='white'; ctx.lineWidth=GRID*0.18; ctx.beginPath(); drawSpline(ctx, slitherPts.map(p=>({x:p.x, y:p.y-GRID*0.12}))); ctx.stroke(); ctx.globalAlpha=1;
+
+      // Head details (eyes)
+      ctx.fillStyle = UI.style.value==='mono' ? '#003d00' : '#0a120a';
+      ctx.beginPath(); ctx.arc(head.x - GRID*0.12, head.y - GRID*0.12, GRID*0.08, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(head.x + GRID*0.12, head.y - GRID*0.12, GRID*0.08, 0, Math.PI*2); ctx.fill();
+
+      ctx.restore();
+    }
+
+    function drawSpline(ctx, pts){
+      if(pts.length===2){ ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(pts[1].x, pts[1].y); return; }
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for(let i=0;i<pts.length-1;i++){
+        const p0 = pts[Math.max(0,i-1)], p1 = pts[i], p2 = pts[i+1], p3 = pts[Math.min(pts.length-1,i+2)];
+        const t = 0.5; // Catmull–Rom tension
+        const cp1x = p1.x + (p2.x - p0.x) * t/6;
+        const cp1y = p1.y + (p2.y - p0.y) * t/6;
+        const cp2x = p2.x - (p3.x - p1.x) * t/6;
+        const cp2y = p2.y - (p3.y - p1.y) * t/6;
+        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+      }
+    }
+
+    function drawParticles(){
+      for(let i=particles.length-1;i>=0;i--){
+        const p = particles[i];
+        p.x += p.vx; p.y += p.vy; p.vy += 0.05; p.life--;
+        if(p.life<=0){ particles.splice(i,1); continue; }
+        const a = Math.max(0, p.life/40);
+        ctx.fillStyle = p.col.replace(/\d+\.?\d*\)$/,'') + (a.toFixed(2)+')');
+        ctx.beginPath(); ctx.arc(p.x, p.y, 2.4, 0, Math.PI*2); ctx.fill();
+      }
+    }
+
+    // Hook up UI
+    UI.start.addEventListener('click', ()=>{ if(!playing){ playing=true; paused=false; lastTime=performance.now(); requestAnimationFrame(loop); } });
+    UI.pause.addEventListener('click', togglePause);
+    UI.reset.addEventListener('click', ()=>{ reset(); });
+    UI.mode.addEventListener('change', ()=>{ /* no-op; affects collision in step() */ });
+    UI.style.addEventListener('change', ()=>{ /* no-op; affects rendering in draw() */ });
+
+    reset();
+    draw(0);
+  })();
+  </script>
+</body>
+</html>
